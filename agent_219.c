@@ -141,6 +141,51 @@ long get_uptime_sec(void)
     return (long)uptime;
 }
 
+void get_process_list(char *output, size_t output_size)
+{
+    FILE *process_file;
+    char line[256];
+    size_t used = 0;
+
+    output[0] = '\0';
+
+    process_file = popen("ps -e -o pid= -o comm=", "r");
+
+    if (process_file == NULL)
+    {
+        snprintf(output, output_size, "PROCESS_LIST_ERROR");
+        return;
+    }
+
+    while (fgets(line, sizeof(line), process_file) != NULL)
+    {
+        int pid;
+        char process_name[128];
+
+        if (sscanf(line, "%d %127s", &pid, process_name) == 2)
+        {
+            int written;
+
+            written = snprintf(output + used,
+                               output_size - used,
+                               "%s%d/%s",
+                               used == 0 ? "" : ",",
+                               pid,
+                               process_name);
+
+            if (written < 0 ||
+                (size_t)written >= output_size - used)
+            {
+                break;
+            }
+
+            used += (size_t)written;
+        }
+    }
+
+    pclose(process_file);
+}
+
 int main(void)
 {
     int server_fd;
@@ -302,6 +347,29 @@ int main(void)
             send_all(client_fd,
                     response,
                     strlen(response));
+         }
+
+         /*
+          * LISTPROC command
+          */
+         else if (strcmp(buffer, "LISTPROC") == 0)
+        {
+          char process_list[BUFFER_SIZE];
+
+          get_process_list(process_list,
+                     sizeof(process_list));
+
+          char response[BUFFER_SIZE];
+
+          snprintf(response,
+                   sizeof(response),
+                   "OK PROCS %s SID:%s\n",
+                   process_list,
+                   SID);
+
+          send_all(client_fd,
+                   response,
+                   strlen(response));
          }
 
         /*
