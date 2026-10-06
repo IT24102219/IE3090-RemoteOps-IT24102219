@@ -372,6 +372,115 @@ int main(void)
                    strlen(response));
          }
 
+         /*
+          * EXEC command
+          */
+          else if (strncmp(buffer, "EXEC ", 5) == 0)
+          {
+               char command_name[100];
+               char exec_output[2048];
+               const char *system_command = NULL;
+
+               if (sscanf(buffer + 5, "%99s", command_name) != 1)
+               {
+                    char response[BUFFER_SIZE];
+
+                    snprintf(response,
+                             sizeof(response),
+                             "ERR 002 COMMAND_NOT_ALLOWED SID:%s\n",
+                             SID);
+
+               send_all(client_fd, response, strlen(response));
+           }
+           else
+           {
+               /*
+                * Fixed whitelist.
+                * No user-supplied shell command is executed.
+                */
+                if (strcmp(command_name, "DATE") == 0)
+                {
+                     system_command = "date";
+                }
+                else if (strcmp(command_name, "UPTIME") == 0)
+                {
+                     system_command = "uptime -p";
+                }
+                else if (strcmp(command_name, "DISKFREE") == 0)
+                {
+                     system_command = "df -h / | awk 'NR==2 {print $4}'";
+                }
+                else if (strcmp(command_name, "HOSTNAME") == 0)
+                {
+                     system_command = "hostname";
+                }
+                else if (strcmp(command_name, "WHOAMI") == 0)
+                {
+                     system_command = "whoami";
+                }
+                else
+                {
+                     char response[BUFFER_SIZE];
+
+                     snprintf(response,
+                              sizeof(response),
+                              "ERR 002 COMMAND_NOT_ALLOWED SID:%s\n",
+                              SID);
+
+                     send_all(client_fd, response, strlen(response));
+
+                     system_command = NULL;
+                }
+
+                if (system_command != NULL)
+                {
+                    FILE *pipe;
+                    pipe = popen(system_command, "r");
+
+                    if (pipe == NULL)
+                    {
+                        char response[BUFFER_SIZE];
+
+                        snprintf(response,
+                                 sizeof(response),
+                                 "ERR 999 EXEC_FAILED SID:%s\n",
+                                 SID);
+
+                        send_all(client_fd, response, strlen(response));
+                     }
+                     else
+                     {
+                          memset(exec_output, 0, sizeof(exec_output));
+
+                          if (fgets(exec_output,
+                                    sizeof(exec_output),
+                                    pipe) != NULL)
+                          {
+                              exec_output[strcspn(exec_output, "\r\n")] = '\0';
+                          }
+                          else
+                          {
+                              strcpy(exec_output, "NO_OUTPUT");
+                          }
+
+                          pclose(pipe);
+
+                          char response[BUFFER_SIZE];
+
+                          snprintf(response,
+                                   sizeof(response),
+                                   "OK EXEC_RESULT %s SID:%s\n",
+                                   exec_output,
+                                   SID);
+
+                          send_all(client_fd,
+                                   response,
+                                   strlen(response));
+                   }
+                }
+             }
+          }
+
         /*
          * QUIT command
          */
