@@ -72,6 +72,75 @@ int recv_line(int sock_fd, char *buffer, size_t size)
     return (int)position;
 }
 
+double get_cpu_load(void)
+{
+    FILE *file;
+    double load = 0.0;
+
+    file = fopen("/proc/loadavg", "r");
+
+    if (file == NULL)
+    {
+        return 0.0;
+    }
+
+    fscanf(file, "%lf", &load);
+
+    fclose(file);
+
+    return load;
+}
+
+long get_memory_used_mb(void)
+{
+    FILE *file;
+    char label[64];
+    long total = 0;
+    long available = 0;
+
+    file = fopen("/proc/meminfo", "r");
+
+    if (file == NULL)
+    {
+        return 0;
+    }
+
+    while (fscanf(file, "%63s %ld kB", label, &available) == 2)
+    {
+        if (strcmp(label, "MemTotal:") == 0)
+        {
+            total = available;
+        }
+        else if (strcmp(label, "MemAvailable:") == 0)
+        {
+            break;
+        }
+    }
+
+    fclose(file);
+
+    return (total - available) / 1024;
+}
+
+long get_uptime_sec(void)
+{
+    FILE *file;
+    double uptime = 0.0;
+
+    file = fopen("/proc/uptime", "r");
+
+    if (file == NULL)
+    {
+        return 0;
+    }
+
+    fscanf(file, "%lf", &uptime);
+
+    fclose(file);
+
+    return (long)uptime;
+}
+
 int main(void)
 {
     int server_fd;
@@ -210,6 +279,30 @@ int main(void)
                      response,
                      strlen(response));
         }
+
+        /*
+         * SYSINFO command
+         */
+        else if (strcmp(buffer, "SYSINFO") == 0)
+       {
+           double cpu_load = get_cpu_load();
+           long memory_used_mb = get_memory_used_mb();
+           long uptime_sec = get_uptime_sec();
+
+           char response[BUFFER_SIZE];
+
+           snprintf(response,
+                    sizeof(response),
+                    "OK SYSINFO %.2f %ld %ld SID:%s\n",
+                    cpu_load,
+                    memory_used_mb,
+                    uptime_sec,
+                    SID);
+
+            send_all(client_fd,
+                    response,
+                    strlen(response));
+         }
 
         /*
          * QUIT command
