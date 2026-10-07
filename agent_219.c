@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <pthread.h>
 
 #define PORT 9410
 #define SID "9122"
@@ -12,6 +13,7 @@
 #define BUFFER_SIZE 32768
 #define STORAGE_DIR "./agentfiles/IT24102219"
 #define MAX_FILE_SIZE (10 * 1024 * 1024)
+#define MONITOR_INTERVAL 2
 
 /*
  * Send all requested bytes.
@@ -239,6 +241,86 @@ int send_file(int sock_fd, FILE *file, size_t file_size)
 
     return 0;
 }
+
+volatile int monitor_running = 0;
+pthread_t monitor_thread;
+
+struct monitor_info
+{
+    char client_ip[INET_ADDRSTRLEN];
+    int udp_port;
+};
+
+void *monitor_function(void *arg)
+{
+    struct monitor_info *info =
+        (struct monitor_info *)arg;
+
+    int udp_socket;
+
+    struct sockaddr_in udp_addr;
+
+    udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
+
+    if (udp_socket < 0)
+    {
+        perror("UDP socket");
+        monitor_running = 0;
+        free(info);
+        return NULL;
+    }
+
+    memset(&udp_addr, 0, sizeof(udp_addr));
+
+    udp_addr.sin_family = AF_INET;
+    udp_addr.sin_port = htons(info->udp_port);
+
+    if (inet_pton(AF_INET,
+                  info->client_ip,
+                  &udp_addr.sin_addr) <= 0)
+    {
+        perror("inet_pton");
+        close(udp_socket);
+        monitor_running = 0;
+        free(info);
+        return NULL;
+    }
+
+    while (monitor_running)
+    {
+        double cpu_load = get_cpu_load();
+        long memory_used_mb = get_memory_used_mb();
+        long uptime_sec = get_uptime_sec();
+
+        char message[BUFFER_SIZE];
+
+        snprintf(message,
+                 sizeof(message),
+                 "SYSINFO %.2f %ld %ld SID:%s",
+                 cpu_load,
+                 memory_used_mb,
+                 uptime_sec,
+                 SID);
+
+        sendto(udp_socket,
+               message,
+               strlen(message),
+               0,
+               (struct sockaddr *)&udp_addr,
+               sizeof(udp_addr));
+
+        sleep(MONITOR_INTERVAL);
+    }
+
+    close(udp_socket);
+    free(info);
+
+    return NULL;
+}
+
+int monitor_active = 0;
+pthread_t monitor_thread;
+
 
 int main(void)
 {
@@ -765,10 +847,168 @@ int main(void)
           }
 
         /*
+         * MONITOR START command
+         */
+         else if (strncmp(buffer, "MONITOR START ", 14) == 0)
+{
+    int udp_port;
+
+    if (sscanf(buffer + 14, "%d", &udp_port) != 1 ||
+        udp_port < 1 ||
+        udp_port > 65535)
+    {
+        char response[BUFFER_SIZE];
+
+        snprintf(response,
+                 sizeof(response),
+                 "ERR 006 INVALID_UDP_PORT SID:%s\n",
+                 SID);
+
+        send_all(client_fd,
+                 response,
+                 strlen(response));
+    }
+    else if (monitor_running)
+    {
+        char response[BUFFER_SIZE];
+
+        snprintf(response,
+                 sizeof(response),
+                 "ERR 007 MONITOR_ALREADY_RUNNING SID:%s\n",
+                 SID);
+
+        send_all(client_fd,
+                 response,
+                 strlen(response));
+    }
+    else
+    {
+        struct monitor_info *info =
+            malloc(sizeof(struct monitor_info));
+
+        if (info == NULL)
+        {
+            char response[BUFFER_SIZE];
+
+            snprintf(response,
+                     sizeof(response),
+                     "ERR 999 MONITOR_START_FAILED SID:%s\n",
+                     SID);
+
+            send_all(client_fd,
+                     response,
+                     strlen(response));
+        }
+        else
+        {
+            if (inet_ntop(AF_INET,
+                          &client_addr.sin_addr,
+                          info->client_ip,
+                          sizeof(info->client_ip)) == NULL)
+            {
+                free(info);
+
+                char response[BUFFER_SIZE];
+
+                snprintf(response,
+                         sizeof(response),
+                         "ERR 999 MONITOR_START_FAILED SID:%s\n",
+                         SID);
+
+                send_all(client_fd,
+                         response,
+                         strlen(response));
+            }
+            else
+            {
+                info->udp_port = udp_port;
+
+                monitor_running = 1;
+
+                if (pthread_create(&monitor_thread,
+                                   NULL,
+                                   monitor_function,
+                                   info) != 0)
+                {
+                    monitor_running = 0;
+                    free(info);
+
+                    char response[BUFFER_SIZE];
+
+                    snprintf(response,
+                             sizeof(response),
+                             "ERR 999 MONITOR_START_FAILED SID:%s\n",
+                             SID);
+
+                    send_all(client_fd,
+                             response,
+                             strlen(response));
+                }
+                else
+                {
+                    char response[BUFFER_SIZE];
+
+                    snprintf(response,
+                             sizeof(response),
+                             "OK MONITOR_STARTED SID:%s\n",
+                             SID);
+
+                    send_all(client_fd,
+                             response,
+                             strlen(response));
+                }
+            }
+        }
+    }
+}
+
+        /*
+         * MONITOR STOP command
+         */
+         else if (strcmp(buffer, "MONITOR STOP") == 0)
+{
+    monitor_running = 0;
+
+    if (pthread_join(monitor_thread, NULL) == 0)
+    {
+        char response[BUFFER_SIZE];
+
+        snprintf(response,
+                 sizeof(response),
+                 "OK MONITOR_STOPPED SID:%s\n",
+                 SID);
+
+        send_all(client_fd,
+                 response,
+                 strlen(response));
+    }
+    else
+    {
+        char response[BUFFER_SIZE];
+
+        snprintf(response,
+                 sizeof(response),
+                 "ERR 999 MONITOR_STOP_FAILED SID:%s\n",
+                 SID);
+
+        send_all(client_fd,
+                 response,
+                 strlen(response));
+    }
+}
+
+        /*
          * QUIT command
          */
         else if (strcmp(buffer, "QUIT") == 0)
         {
+
+            if (monitor_running)
+            {
+                monitor_running = 0;
+                pthread_join(monitor_thread, NULL);
+            }
+
             char response[BUFFER_SIZE];
 
             snprintf(response,
@@ -787,7 +1027,7 @@ int main(void)
          * Other commands will be implemented later.
          */
         else
-        {
+       {
             char response[BUFFER_SIZE];
 
             snprintf(response,

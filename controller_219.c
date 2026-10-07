@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <pthread.h>
 
 #define SERVER_IP "127.0.0.1"
 #define SERVER_PORT 9410
@@ -115,6 +116,44 @@ int send_file(int sock_fd, FILE *file, size_t file_size)
     return 0;
 }
 
+int udp_socket_fd = -1;
+volatile int udp_receiver_running = 0;
+pthread_t udp_receiver_thread;
+
+void *udp_receiver_function(void *arg)
+{
+    (void)arg;
+
+    char buffer[BUFFER_SIZE];
+
+    while (udp_receiver_running)
+    {
+        struct sockaddr_in sender_addr;
+        socklen_t sender_len = sizeof(sender_addr);
+
+        ssize_t received =
+            recvfrom(udp_socket_fd,
+                     buffer,
+                     sizeof(buffer) - 1,
+                     0,
+                     (struct sockaddr *)&sender_addr,
+                     &sender_len);
+
+        if (received > 0)
+        {
+            buffer[received] = '\0';
+
+            printf("\n[UDP MONITOR] %s\n",
+                   buffer);
+
+            printf("RemoteOps> ");
+            fflush(stdout);
+        }
+    }
+
+    return NULL;
+}
+
 int main(void)
 {
     int sock_fd;
@@ -170,6 +209,66 @@ int main(void)
 
         /* Remove newline */
         command[strcspn(command, "\r\n")] = '\0';
+
+        /*
+         * Prepare UDP monitoring receiver
+         */
+         if (strncmp(command, "MONITOR START ", 14) == 0)
+         {
+            int udp_port;
+
+            if (sscanf(command + 14, "%d", &udp_port) != 1 ||
+                udp_port < 1 ||
+                udp_port > 65535)
+            {
+                printf("Usage: MONITOR START <udp_port>\n");
+                continue;
+            }
+
+            udp_socket_fd = socket(AF_INET,
+                                   SOCK_DGRAM,
+                                   0);
+
+            if (udp_socket_fd < 0)
+            {
+                perror("UDP socket");
+                continue;
+            }
+
+            struct sockaddr_in local_udp_addr;
+
+            memset(&local_udp_addr,
+                   0,
+                   sizeof(local_udp_addr));
+
+            local_udp_addr.sin_family = AF_INET;
+            local_udp_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+            local_udp_addr.sin_port = htons(udp_port);
+
+            if (bind(udp_socket_fd,
+                     (struct sockaddr *)&local_udp_addr,
+                     sizeof(local_udp_addr)) < 0)
+            {
+                perror("UDP bind");
+                close(udp_socket_fd);
+                udp_socket_fd = -1;
+                continue;
+            }
+
+            udp_receiver_running = 1;
+
+            if (pthread_create(&udp_receiver_thread,
+                               NULL,
+                               udp_receiver_function,
+                               NULL) != 0)
+            {
+                perror("pthread_create");
+                udp_receiver_running = 0;
+                close(udp_socket_fd);
+                udp_socket_fd = -1;
+                continue;
+             }
+         }
 
         /*
          * PUT command
