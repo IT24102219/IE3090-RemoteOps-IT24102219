@@ -9,7 +9,9 @@
 #define PORT 9410
 #define SID "9122"
 #define AUTH_TOKEN "OPS-2219"
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 32768
+#define STORAGE_DIR "./agentfiles/IT24102219"
+#define MAX_FILE_SIZE (10 * 1024 * 1024)
 
 /*
  * Send all requested bytes.
@@ -184,6 +186,58 @@ void get_process_list(char *output, size_t output_size)
     }
 
     pclose(process_file);
+}
+
+int recv_all(int sock_fd, void *buffer, size_t length)
+{
+    size_t total_received = 0;
+
+    while (total_received < length)
+    {
+        ssize_t received = recv(sock_fd,
+                                (char *)buffer + total_received,
+                                length - total_received,
+                                0);
+
+        if (received <= 0)
+        {
+            return -1;
+        }
+
+        total_received += (size_t)received;
+    }
+
+    return 0;
+}
+
+int send_file(int sock_fd, FILE *file, size_t file_size)
+{
+    char buffer[4096];
+    size_t total_sent = 0;
+
+    while (total_sent < file_size)
+    {
+        size_t remaining = file_size - total_sent;
+        size_t chunk_size = remaining < sizeof(buffer)
+                                ? remaining
+                                : sizeof(buffer);
+
+        size_t bytes_read = fread(buffer, 1, chunk_size, file);
+
+        if (bytes_read == 0)
+        {
+            return -1;
+        }
+
+        if (send_all(sock_fd, buffer, bytes_read) < 0)
+        {
+            return -1;
+        }
+
+        total_sent += bytes_read;
+    }
+
+    return 0;
 }
 
 int main(void)
@@ -362,7 +416,7 @@ int main(void)
           char response[BUFFER_SIZE];
 
           snprintf(response,
-                   sizeof(response),
+                    sizeof(response),
                    "OK PROCS %s SID:%s\n",
                    process_list,
                    SID);
@@ -371,6 +425,235 @@ int main(void)
                    response,
                    strlen(response));
          }
+
+          /*
+           * PUT command
+           */
+          else if (strncmp(buffer, "PUT ", 4) == 0)
+         {
+               char filename[256];
+               long file_size;
+
+               if (sscanf(buffer + 4, "%255s %ld", filename, &file_size) != 2)
+               {
+                  char response[BUFFER_SIZE];
+
+                  snprintf(response,
+                           sizeof(response),
+                           "ERR 004 FILE_TOO_LARGE SID:%s\n",
+                           SID);
+
+                  send_all(client_fd, response, strlen(response));
+          }
+          else if (file_size < 0 || file_size > MAX_FILE_SIZE ||
+                   strchr(filename, '/') != NULL ||
+                   strstr(filename, "..") != NULL)
+          {
+               char response[BUFFER_SIZE];
+
+               snprintf(response,
+                        sizeof(response),
+                        "ERR 004 FILE_TOO_LARGE SID:%s\n",
+                        SID);
+
+               send_all(client_fd, response, strlen(response));
+           }
+           else
+           {
+               char path[BUFFER_SIZE];
+
+               snprintf(path,
+                        sizeof(path),
+                        "%s/%s",
+                        STORAGE_DIR,
+                        filename);
+
+               FILE *file = fopen(path, "wb");
+
+               if (file == NULL)
+               {
+                  char response[BUFFER_SIZE];
+
+                  snprintf(response,
+                           sizeof(response),
+                           "ERR 999 FILE_WRITE_ERROR SID:%s\n",
+                           SID);
+
+                  send_all(client_fd, response, strlen(response));
+               }
+               else
+               {
+                  int transfer_ok =
+                      recv_all(client_fd, NULL, 0);
+
+                  if (file_size > 0)
+                  {
+                      char file_buffer[4096];
+                      long remaining = file_size;
+
+                      transfer_ok = 0;
+
+                      while (remaining > 0)
+                      {
+                           size_t chunk_size =
+                                remaining < (long)sizeof(file_buffer)
+                                    ? (size_t)remaining
+                                    : sizeof(file_buffer);
+
+                           ssize_t received =
+                                recv(client_fd,
+                                     file_buffer,
+                                     chunk_size,
+                                     0);
+
+                           if (received <= 0)
+                           {
+                               transfer_ok = -1;
+                               break;
+                            }
+
+                           if (fwrite(file_buffer,
+                                      1,
+                                      (size_t)received,
+                                      file) != (size_t)received)
+                            {
+                               transfer_ok = -1;
+                               break;
+                            }
+
+                            remaining -= received;
+                          }
+                       }
+
+                       fclose(file);
+
+                       if (transfer_ok == 0)
+                       {
+                           char response[BUFFER_SIZE];
+
+                           snprintf(response,
+                                    sizeof(response),
+                                    "OK FILE_RECEIVED %s SID:%s\n",
+                                    filename,
+                                    SID);
+
+                           send_all(client_fd,
+                                    response,
+                                    strlen(response));
+                       }
+                       else
+                       {
+                           char response[BUFFER_SIZE];
+
+                           snprintf(response,
+                                    sizeof(response),
+                                    "ERR 999 FILE_TRANSFER_ERROR SID:%s\n",
+                                    SID);
+
+                           send_all(client_fd,
+                                    response,
+                                    strlen(response));
+                        }
+                     }
+                  }
+               }
+
+          /*
+           * GET command
+           */
+           else if (strncmp(buffer, "GET ", 4) == 0)
+           {
+                char filename[256];
+
+                if (sscanf(buffer + 4, "%255s", filename) != 1 ||
+                    strchr(filename, '/') != NULL ||
+                    strstr(filename, "..") != NULL)
+                {
+                    char response[BUFFER_SIZE];
+
+                    snprintf(response,
+                             sizeof(response),
+                             "ERR 005 FILE_NOT_FOUND SID:%s\n",
+                             SID);
+
+                    send_all(client_fd,
+                             response,
+                             strlen(response));
+                }
+                else
+                {
+                    char path[BUFFER_SIZE];
+
+                    snprintf(path,
+                             sizeof(path),
+                             "%s/%s",
+                             STORAGE_DIR,
+                             filename);
+
+                    FILE *file = fopen(path, "rb");
+
+                    if (file == NULL)
+                    {
+                       char response[BUFFER_SIZE];
+
+                       snprintf(response,
+                                sizeof(response),
+                                "ERR 005 FILE_NOT_FOUND SID:%s\n",
+                                SID);
+
+                       send_all(client_fd,
+                                response,
+                                strlen(response));
+                 }
+                 else
+                 {
+                      fseek(file, 0, SEEK_END);
+                      long file_size = ftell(file);
+                      rewind(file);
+
+                      if (file_size < 0 || file_size > MAX_FILE_SIZE)
+                      {
+                          fclose(file);
+
+                          char response[BUFFER_SIZE];
+
+                          snprintf(response,
+                                   sizeof(response),
+                                   "ERR 004 FILE_TOO_LARGE SID:%s\n",
+                                   SID);
+
+                          send_all(client_fd,
+                                   response,
+                                   strlen(response));
+                      }
+                      else
+                      {
+                          char response[BUFFER_SIZE];
+
+                          snprintf(response,
+                                   sizeof(response),
+                                   "OK FILE_SEND %s %ld SID:%s\n",
+                                   filename,
+                                   file_size,
+                                   SID);
+
+                          if (send_all(client_fd,
+                                       response,
+                                       strlen(response)) == 0)
+                          {
+                              if (send_file(client_fd,
+                                            file,
+                                            (size_t)file_size) < 0)
+                              {
+                                  printf("File send failed.\n");
+                              }
+                           }
+
+                           fclose(file);
+                        }
+                     }
+                  }
+               }
 
          /*
           * EXEC command
