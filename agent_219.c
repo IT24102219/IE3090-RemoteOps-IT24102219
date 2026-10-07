@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <signal.h>
 
 #define PORT 9410
 #define SID "9122"
@@ -366,9 +367,15 @@ int main(void)
         return 1;
     }
 
+    signal(SIGCHLD, SIG_IGN);
+
     printf("RemoteOps Agent listening on port %d...\n", PORT);
 
     /* Accept one Controller for now */
+    while (1)
+{
+    client_len = sizeof(client_addr);
+
     client_fd = accept(server_fd,
                        (struct sockaddr *)&client_addr,
                        &client_len);
@@ -376,14 +383,26 @@ int main(void)
     if (client_fd < 0)
     {
         perror("accept");
-        close(server_fd);
-        return 1;
+        continue;
     }
 
-    printf("Controller connected!\n");
+    pid_t pid = fork();
 
-    int authenticated = 0;
-    char buffer[BUFFER_SIZE];
+    if (pid < 0)
+    {
+        perror("fork");
+        close(client_fd);
+        continue;
+    }
+
+    if (pid == 0)
+    {
+        close(server_fd);
+
+        printf("Controller connected!\n");
+
+        int authenticated = 0;
+        char buffer[BUFFER_SIZE];
 
     while (1)
     {
@@ -1042,7 +1061,12 @@ int main(void)
     }
 
     close(client_fd);
-    close(server_fd);
+    return 0;
+    }
 
+    close(client_fd);
+    }
+
+    close(server_fd);
     return 0;
 }
